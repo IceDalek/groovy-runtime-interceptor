@@ -1,0 +1,221 @@
+package sandbox;
+
+import groovy.lang.Closure;
+import groovy.lang.MetaClass;
+import groovy.lang.MetaClassImpl;
+import groovy.lang.MetaMethod;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Set;
+import org.codehaus.groovy.runtime.InvokerHelper;
+import org.codehaus.groovy.runtime.MetaClassHelper;
+
+/**
+ * Runtime insurance for scripts compiled by {@link InterceptCustomizer}. Only ever called
+ * from bytecode that customizer generated - host code compiled by plain javac never
+ * references this class, so the guard cannot be reached from outside a sandboxed script.
+ */
+public final class RuntimeGuard {
+
+    /**
+     * Classes whose methods/constructors a script may call. Checked against the class that
+     * actually declares the resolved method, not the receiver's static/declared type -
+     * otherwise a whitelisted interface could be used to reach an unlisted implementation.
+     */
+    private static final Set<Class<?>> ALLOWED_CLASSES = new HashSet<>(Arrays.asList(
+            String.class,
+            Integer.class,
+            Long.class,
+            Double.class,
+            Boolean.class,
+            Character.class,
+            java.math.BigDecimal.class,
+            java.math.BigInteger.class,
+
+            java.util.List.class,
+            java.util.ArrayList.class,
+            java.util.Map.class,
+            java.util.LinkedHashMap.class,
+            java.util.HashMap.class,
+            java.util.Set.class,
+            java.util.LinkedHashSet.class,
+
+            // Groovy's collection/string GDK "extension methods" (each, collect, findAll,
+            // join, tokenize, ...) are registered per receiver-interface: pickMethod()
+            // reports the declaring class as that interface (Iterable/Collection/
+            // CharSequence), never as DefaultGroovyMethods/StringGroovyMethods itself -
+            // verified directly against MetaClassImpl, since it's easy to assume otherwise.
+            java.lang.Iterable.class,
+            java.util.Collection.class,
+            java.lang.CharSequence.class,
+
+            java.time.LocalDate.class
+    ));
+
+    /**
+     * Denied on every receiver, even an allowed one - each is a one-hop escape from the
+     * sandbox (reflection, metaclass tampering, or a call the JVM makes outside our control).
+     */
+    private static final Set<String> DENIED_METHODS = new HashSet<>(Arrays.asList(
+            "getClass", "getMetaClass", "setMetaClass",
+            "getClassLoader", "forName",
+            "invokeMethod", "getProperty", "setProperty",
+            "wait", "notify", "notifyAll", "finalize"
+    ));
+
+    // ------------------------------------------------------------------ methods
+
+    /**
+     * @param safe   {@code a?.m()} call
+     * @param spread {@code a*.m()} call
+     */
+    public static Object checkedCall(Object receiver, boolean safe, boolean spread,
+                                      Object methodName, Object[] args) throws Throwable {
+        String method = String.valueOf(methodName);
+        args = fixNull(args);
+
+        if (safe && receiver == null) return null;
+
+        if (spread) {
+            List<Object> out = new ArrayList<>();
+            for (Iterator<?> it = InvokerHelper.asIterator(receiver); it.hasNext(); ) {
+                Object o = it.next();
+                if (o != null) out.add(checkedCall(o, true, false, method, args));
+            }
+            return out;
+        }
+
+        if (receiver == null) {
+            // Groovy treats this as NullObject; nothing dangerous can be reached this way.
+            return InvokerHelper.invokeMethod(null, method, args);
+        }
+
+        Class<?>[] argTypes = MetaClassHelper.convertToTypeArray(args);
+
+        // "Foo.bar()" compiles to a plain call with a Class receiver. Distinguish a static
+        // method on Foo from an instance method of java.lang.Class itself.
+        if (receiver instanceof Class) {
+            MetaClass mc = InvokerHelper.getMetaClass((Class<?>) receiver);
+            if (mc instanceof MetaClassImpl) {
+                MetaMethod sm = ((MetaClassImpl) mc).retrieveStaticMethod(method, args);
+                if (sm != null && sm.isStatic()) {
+                    Class<?> declaring = sm.getDeclaringClass().getTheClass();
+                    check(declaring, method, argTypes);
+                    Class<?> target = (declaring == Class.class) ? Class.class : (Class<?>) receiver;
+                    return InvokerHelper.invokeStaticMethod(target, method, args);
+                }
+            }
+        }
+
+        // Closures dispatch through owner/delegate; check the real target, otherwise
+        // { -> delegate = System; exit(-1) }() would slip past the whitelist.
+        if (receiver instanceof Closure) {
+            if (InvokerHelper.getMetaClass(receiver).pickMethod(method, argTypes) == null) {
+                for (Object target : closureTargets((Closure<?>) receiver)) {
+                    if (InvokerHelper.getMetaClass(target).pickMethod(method, argTypes) != null) {
+                        return checkedCall(target, false, false, method, args);
+                    }
+                }
+            }
+        }
+
+        MetaMethod m = InvokerHelper.getMetaClass(receiver).pickMethod(method, argTypes);
+        if (m == null) {
+            // methodMissing / invokeMethod / Expando: the real target is unknowable ahead of
+            // time, so there is nothing to check. Fail closed.
+            throw new SecurityException("Unresolvable call: "
+                    + receiver.getClass().getName() + "." + method + formatArgs(argTypes));
+        }
+
+        Class<?> declaring = m.getDeclaringClass().getTheClass();
+        check(declaring, method, argTypes);
+        return InvokerHelper.invokeMethod(receiver, method, args);
+    }
+
+    /** Static imports and some AST replacements. */
+    public static Object checkedStaticCall(Class<?> type, String method, Object[] args) throws Throwable {
+        args = fixNull(args);
+        check(type, method, MetaClassHelper.convertToTypeArray(args));
+        return InvokerHelper.invokeStaticMethod(type, method, args);
+    }
+
+    // ----------------------------------------------------------- constructors
+
+    public static Object checkedConstructor(Class<?> type, Object[] args) throws Throwable {
+        args = fixNull(args);
+        if (!isAllowed(type)) {
+            deny(type, "<init>", MetaClassHelper.convertToTypeArray(args));
+        }
+        return InvokerHelper.invokeConstructorOf(type, args);
+    }
+
+    // ---------------------------------------------------------------- checks
+
+    private static void check(Class<?> declaring, String name, Class<?>[] argTypes) {
+        if (DENIED_METHODS.contains(name) || !isAllowed(declaring)) {
+            deny(declaring, name, argTypes);
+        }
+    }
+
+    /**
+     * Exact match on the class that declared the method, plus its directly implemented
+     * interfaces - so allowing List covers any concrete implementation.
+     */
+    private static boolean isAllowed(Class<?> c) {
+        if (c == null) return false;
+        if (ALLOWED_CLASSES.contains(c)) return true;
+        for (Class<?> i : c.getInterfaces()) {
+            if (ALLOWED_CLASSES.contains(i)) return true;
+        }
+        return false;
+    }
+
+    private static void deny(Class<?> owner, String name, Class<?>[] argTypes) {
+        throw new SecurityException("Rejected: "
+                + (owner == null ? "?" : owner.getName()) + "." + name + formatArgs(argTypes));
+    }
+
+    // --------------------------------------------------------------- helpers
+
+    private static String formatArgs(Class<?>[] argTypes) {
+        StringBuilder sb = new StringBuilder("(");
+        for (int i = 0; i < argTypes.length; i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(argTypes[i] == null ? "null" : argTypes[i].getName());
+        }
+        return sb.append(')').toString();
+    }
+
+    /** Groovy sometimes passes null instead of an array holding a single null. */
+    private static Object[] fixNull(Object[] args) {
+        return args == null ? new Object[1] : args;
+    }
+
+    private static List<Object> closureTargets(Closure<?> c) {
+        Object owner = c.getOwner();
+        Object delegate = c.getDelegate();
+        switch (c.getResolveStrategy()) {
+            case Closure.OWNER_FIRST:    return nonNull(owner, delegate);
+            case Closure.DELEGATE_FIRST: return nonNull(delegate, owner);
+            case Closure.OWNER_ONLY:     return nonNull(owner);
+            case Closure.DELEGATE_ONLY:  return nonNull(delegate);
+            default:                     return Collections.emptyList(); // TO_SELF
+        }
+    }
+
+    private static List<Object> nonNull(Object a, Object b) {
+        if (a == null) return nonNull(b);
+        if (b == null || a == b) return nonNull(a);
+        return Arrays.asList(a, b);
+    }
+
+    private static List<Object> nonNull(Object a) {
+        return a == null ? Collections.emptyList() : Collections.singletonList(a);
+    }
+
+    private RuntimeGuard() {}
+}
