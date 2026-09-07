@@ -1,5 +1,7 @@
 package sandbox;
 
+import java.util.Objects;
+
 /**
  * Single JVM-wide slot holding the active {@link RuntimeGuard}.
  *
@@ -32,7 +34,7 @@ final class GuardHolder {
 
     static RuntimeGuard get() {
         RuntimeGuard guard = instance;
-        if (guard == null) {
+        if (Objects.isNull(guard)) {
             throw new SecurityException("No RuntimeGuard registered - is the Spring context up?");
         }
         return guard;

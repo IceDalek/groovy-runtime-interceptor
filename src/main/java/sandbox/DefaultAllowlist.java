@@ -1,12 +1,16 @@
 package sandbox;
 
-import java.util.Set;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /** The whitelist {@link RuntimeGuard} gets by default, via {@link RuntimeGuardConfiguration}. */
 public final class DefaultAllowlist {
 
-    public static Set<Class<?>> get() {
-        return Set.of(
+    /** No method-name restriction on any of these - every method they declare is callable. */
+    public static Map<String, List<String>> get() {
+        return Stream.of(
                 String.class,
                 Integer.class,
                 Long.class,
@@ -34,7 +38,7 @@ public final class DefaultAllowlist {
                 java.lang.CharSequence.class,
 
                 java.time.LocalDate.class
-        );
+        ).collect(Collectors.toMap(Class::getName, c -> List.<String>of()));
     }
 
     private DefaultAllowlist() {}

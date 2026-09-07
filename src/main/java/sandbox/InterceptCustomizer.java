@@ -2,6 +2,7 @@ package sandbox;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import org.codehaus.groovy.ast.ClassCodeExpressionTransformer;
 import org.codehaus.groovy.ast.ClassHelper;
 import org.codehaus.groovy.ast.ClassNode;
@@ -43,7 +44,7 @@ public class InterceptCustomizer extends CompilationCustomizer {
 
     @Override
     public void call(final SourceUnit source, GeneratorContext ctx, ClassNode classNode) {
-        if (classNode == null) return;
+        if (Objects.isNull(classNode)) return;
 
         ClassCodeExpressionTransformer tr = new ClassCodeExpressionTransformer() {
 
@@ -52,7 +53,7 @@ public class InterceptCustomizer extends CompilationCustomizer {
 
             @Override
             public Expression transform(Expression exp) {
-                if (exp == null) return null;
+                if (Objects.isNull(exp)) return null;
                 Expression out = doTransform(exp);
                 if (out != exp) out.setSourcePosition(exp);
                 return out;
@@ -135,17 +136,9 @@ public class InterceptCustomizer extends CompilationCustomizer {
             }
         };
 
-        for (MethodNode m : classNode.getMethods()) {
-            tr.visitMethod(m);
-        }
-        for (ConstructorNode c : classNode.getDeclaredConstructors()) {
-            tr.visitConstructor(c);
-        }
-        for (FieldNode f : classNode.getFields()) {
-            tr.visitField(f);
-        }
-        for (Statement s : classNode.getObjectInitializerStatements()) {
-            s.visit(tr);
-        }
+        classNode.getMethods().forEach(tr::visitMethod);
+        classNode.getDeclaredConstructors().forEach(tr::visitConstructor);
+        classNode.getFields().forEach(tr::visitField);
+        classNode.getObjectInitializerStatements().forEach(s -> s.visit(tr));
     }
 }
