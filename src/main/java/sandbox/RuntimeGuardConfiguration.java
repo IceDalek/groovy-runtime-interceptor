@@ -1,25 +1,32 @@
 package sandbox;
 
-import java.util.List;
-import java.util.Map;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * Default wiring for {@link RuntimeGuard}: supplies the {@code allowedMethods} bean its
- * constructor needs. Picked up automatically by any component scan that reaches this package
- * (it's a {@code @Component} itself), alongside {@link RuntimeGuard}.
+ * Builds the {@link RuntimeGuard} bean from externalized configuration, e.g.
+ * {@code application.yml}:
  *
- * <p>To use a different whitelist, define your own {@code Map<String, List<String>>} bean
- * named {@code allowedMethods} - {@link RuntimeGuard}'s constructor parameter has that same
- * name, so it's what gets injected. Whether that needs excluding this configuration or just
- * relies on your definition overriding it depends on your context's bean-overriding setting.
+ * <pre>
+ * sandbox:
+ *   allowed-methods:
+ *     java.lang.String: []
+ *     java.util.List: [add, size]
+ * </pre>
+ *
+ * An empty method list means every method on that class is allowed (see {@link RuntimeGuard});
+ * a class with no entry at all is not allowed. There's no hardcoded fallback here on purpose -
+ * a missing/misconfigured {@code sandbox.allowed-methods} property means an empty map, which
+ * means {@link RuntimeGuard} denies everything. Fail closed, not fail open with a default
+ * whitelist nobody asked for.
  */
 @Configuration
+@EnableConfigurationProperties(SandboxWhitelistProperties.class)
 public class RuntimeGuardConfiguration {
 
-    @Bean
-    public Map<String, List<String>> allowedMethods() {
-        return DefaultAllowlist.get();
+    @Bean(initMethod = "registerAsActiveGuard", destroyMethod = "unregisterAsActiveGuard")
+    public RuntimeGuard runtimeGuard(SandboxWhitelistProperties properties) {
+        return new RuntimeGuard(properties.getAllowedMethods());
     }
 }

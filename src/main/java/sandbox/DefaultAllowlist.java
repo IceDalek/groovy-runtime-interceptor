@@ -1,7 +1,7 @@
 package sandbox;
 
-import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -9,7 +9,7 @@ import java.util.stream.Stream;
 public final class DefaultAllowlist {
 
     /** No method-name restriction on any of these - every method they declare is callable. */
-    public static Map<String, List<String>> get() {
+    public static Map<String, Set<String>> get() {
         return Stream.of(
                 String.class,
                 Integer.class,
@@ -38,7 +38,7 @@ public final class DefaultAllowlist {
                 java.lang.CharSequence.class,
 
                 java.time.LocalDate.class
-        ).collect(Collectors.toMap(Class::getName, c -> List.<String>of()));
+        ).collect(Collectors.toMap(Class::getName, c -> Set.<String>of()));
     }
 
     private DefaultAllowlist() {}

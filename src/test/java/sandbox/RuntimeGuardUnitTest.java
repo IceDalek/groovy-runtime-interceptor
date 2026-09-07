@@ -2,8 +2,8 @@ package sandbox;
 
 import java.io.File;
 import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -71,7 +71,7 @@ class RuntimeGuardUnitTest {
     void allowedMethodsComesFromTheConstructorNotAHardcodedList() throws Throwable {
         // a whitelist with only ArrayList on it (unrestricted) - proves the map passed to the
         // constructor is what actually governs, not something still baked into the class
-        RuntimeGuard narrow = new RuntimeGuard(Map.of("java.util.ArrayList", List.of()));
+        RuntimeGuard narrow = new RuntimeGuard(Map.of("java.util.ArrayList", Set.of()));
 
         Object result = narrow.checkedConstructor(ArrayList.class, new Object[]{});
         assertEquals(new ArrayList<>(), result);
@@ -83,7 +83,7 @@ class RuntimeGuardUnitTest {
 
     @Test
     void emptyMethodListMeansEveryMethodOnThatClassIsAllowed() throws Throwable {
-        RuntimeGuard guard = new RuntimeGuard(Map.of("java.lang.String", List.of()));
+        RuntimeGuard guard = new RuntimeGuard(Map.of("java.lang.String", Set.of()));
 
         assertEquals("HELLO", guard.checkedCall("hello", false, false, "toUpperCase", new Object[0]));
         assertEquals("hello", guard.checkedCall("HELLO", false, false, "toLowerCase", new Object[0]));
@@ -91,7 +91,7 @@ class RuntimeGuardUnitTest {
 
     @Test
     void nonEmptyMethodListOnlyAllowsTheNamedMethods() throws Throwable {
-        RuntimeGuard guard = new RuntimeGuard(Map.of("java.lang.String", List.of("toUpperCase")));
+        RuntimeGuard guard = new RuntimeGuard(Map.of("java.lang.String", Set.of("toUpperCase")));
 
         assertEquals("HELLO", guard.checkedCall("hello", false, false, "toUpperCase", new Object[0]));
         assertThrows(SecurityException.class,
@@ -108,7 +108,7 @@ class RuntimeGuardUnitTest {
         // the List interface, not by ArrayList itself - verified directly (same as collect()).
         // ArrayList still counts as "allowed" for construction via the one-level interface
         // fallback in allowedMethodNames(), since ArrayList directly implements List.
-        RuntimeGuard guard = new RuntimeGuard(Map.of("java.util.List", List.of("add")));
+        RuntimeGuard guard = new RuntimeGuard(Map.of("java.util.List", Set.of("add")));
 
         Object list = guard.checkedConstructor(ArrayList.class, new Object[]{});
         assertEquals(new ArrayList<>(), list);
@@ -121,7 +121,7 @@ class RuntimeGuardUnitTest {
 
     @Test
     void classMissingFromTheMapEntirelyIsDeniedEvenWithNoMethodRestriction() {
-        RuntimeGuard guard = new RuntimeGuard(Map.of("java.lang.String", List.of()));
+        RuntimeGuard guard = new RuntimeGuard(Map.of("java.lang.String", Set.of()));
 
         assertThrows(SecurityException.class,
                 () -> guard.checkedConstructor(ArrayList.class, new Object[]{}));

@@ -17,6 +17,9 @@
         <groovy.version>3.0.21</groovy.version>
         <junit.version>5.10.2</junit.version>
         <spring.version>6.1.13</spring.version>
+        <!-- matches spring.version above: this is the spring-boot release built against
+             Spring Framework 6.1.13. -->
+        <spring-boot.version>3.3.4</spring-boot.version>
     </properties>
 
     <dependencies>
@@ -26,17 +29,21 @@
             <version>${groovy.version}</version>
         </dependency>
 
-        <!-- RuntimeGuard is a Spring bean; spring-context alone is enough for
-             @Component/@PostConstruct/@PreDestroy and a plain ApplicationContext. -->
+        <!-- RuntimeGuardConfiguration/SandboxWhitelistProperties are Spring wiring;
+             spring-context alone is enough for @Bean/@Configuration and a plain
+             ApplicationContext. RuntimeGuard itself has no Spring dependency at all. -->
         <dependency>
             <groupId>org.springframework</groupId>
             <artifactId>spring-context</artifactId>
             <version>${spring.version}</version>
         </dependency>
+        <!-- Just for @ConfigurationProperties/@EnableConfigurationProperties + the relaxed
+             binder - the core spring-boot jar provides all of that without needing
+             spring-boot-autoconfigure or a full SpringApplication bootstrap. -->
         <dependency>
-            <groupId>jakarta.annotation</groupId>
-            <artifactId>jakarta.annotation-api</artifactId>
-            <version>2.1.1</version>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot</artifactId>
+            <version>${spring-boot.version}</version>
         </dependency>
         <dependency>
             <groupId>org.apache.commons</groupId>
