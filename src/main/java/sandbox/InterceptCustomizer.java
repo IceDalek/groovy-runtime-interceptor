@@ -26,14 +26,15 @@ import org.codehaus.groovy.control.SourceUnit;
 import org.codehaus.groovy.control.customizers.CompilationCustomizer;
 
 /**
- * Rewrites method/constructor calls into static calls on {@link RuntimeGuard}, on the
- * {@code CANONICALIZATION} compile phase (after parsing, before real bytecode generation).
- * Runs against Groovy 3.x/4.x/5.x - the AST package ({@code org.codehaus.groovy.ast}) used
- * here is the one Groovy 3+ still ships and keeps binary-stable across those major versions.
+ * Rewrites method/constructor calls into calls on the active {@link RuntimeGuard}, resolved
+ * through {@link GuardHolder}, on the {@code CANONICALIZATION} compile phase (after parsing,
+ * before real bytecode generation). Runs against Groovy 3.x/4.x/5.x - the AST package
+ * ({@code org.codehaus.groovy.ast}) used here is the one Groovy 3+ still ships and keeps
+ * binary-stable across those major versions.
  */
 public class InterceptCustomizer extends CompilationCustomizer {
 
-    private static final ClassNode GUARD = ClassHelper.make(RuntimeGuard.class);
+    private static final ClassNode HOLDER = ClassHelper.make(GuardHolder.class);
     private static final ClassNode METHOD_CLOSURE = ClassHelper.make(GuardedMethodClosure.class);
 
     public InterceptCustomizer() {
@@ -110,8 +111,11 @@ public class InterceptCustomizer extends CompilationCustomizer {
                 return super.transform(exp);
             }
 
+            /** {@code GuardHolder.get().<name>(args)} */
             private Expression guard(String name, Expression... args) {
-                return new StaticMethodCallExpression(GUARD, name, new ArgumentListExpression(args));
+                Expression guardInstance = new StaticMethodCallExpression(HOLDER, "get",
+                        ArgumentListExpression.EMPTY_ARGUMENTS);
+                return new MethodCallExpression(guardInstance, name, new ArgumentListExpression(args));
             }
 
             private ConstantExpression bool(boolean v) {

@@ -2,6 +2,8 @@ package sandbox;
 
 import groovy.lang.GroovyShell;
 import java.util.List;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -10,10 +12,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * End-to-end: script text -> InterceptCustomizer -> RuntimeGuard, through a real GroovyShell.
+ * No Spring context here, so the bean lifecycle that normally installs the guard is stood in
+ * for directly - see {@link RuntimeGuardSpringIntegrationTest} for the real wiring.
  */
 class RuntimeGuardScriptTest {
 
     private final GroovyShell shell = GuardedShellFactory.create();
+
+    @BeforeEach
+    void installGuard() {
+        GuardHolder.set(TestGuards.fresh());
+    }
+
+    @AfterEach
+    void removeGuard() {
+        GuardHolder.set(null);
+    }
 
     @Test
     void whitelistedStringAndCollectionOpsWork() {

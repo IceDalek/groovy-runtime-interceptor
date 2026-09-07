@@ -13,7 +13,7 @@ public class GuardedMethodClosure extends MethodClosure {
 
     protected Object doCall(Object[] args) {
         try {
-            return RuntimeGuard.checkedCall(getOwner(), false, false, getMethod(), args);
+            return GuardHolder.get().checkedCall(getOwner(), false, false, getMethod(), args);
         } catch (Throwable e) {
             throw new InvokerInvocationException(e);
         }

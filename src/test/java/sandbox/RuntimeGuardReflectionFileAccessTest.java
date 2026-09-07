@@ -5,6 +5,8 @@ import groovy.lang.GroovyShell;
 import java.io.File;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -17,6 +19,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * confirm each one is still stopped.
  */
 class RuntimeGuardReflectionFileAccessTest {
+
+    @BeforeEach
+    void installGuard() {
+        GuardHolder.set(TestGuards.fresh());
+    }
+
+    @AfterEach
+    void removeGuard() {
+        GuardHolder.set(null);
+    }
 
     @Test
     void directFileConstructionIsRejected() {

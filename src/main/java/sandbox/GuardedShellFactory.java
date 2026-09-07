@@ -5,7 +5,15 @@ import groovy.lang.GroovyClassLoader;
 import groovy.lang.GroovyShell;
 import org.codehaus.groovy.control.CompilerConfiguration;
 
-/** Builds a {@link GroovyShell} wired with {@link InterceptCustomizer}. */
+/**
+ * Builds a {@link GroovyShell} wired with {@link InterceptCustomizer}.
+ *
+ * <p>Doesn't touch {@link RuntimeGuard} itself: it's a Spring singleton, so exactly one
+ * instance exists for the whole JVM and it registers itself with {@link GuardHolder} on
+ * construction. Evaluating a script before the Spring context has started (so before any
+ * {@link RuntimeGuard} bean exists) fails closed with a {@link SecurityException} - see
+ * {@link GuardHolder#get()}.
+ */
 public final class GuardedShellFactory {
 
     private GuardedShellFactory() {}
