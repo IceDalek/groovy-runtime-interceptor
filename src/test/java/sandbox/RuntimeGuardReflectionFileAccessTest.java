@@ -1,14 +1,18 @@
 package sandbox;
 
 import groovy.lang.Binding;
+import groovy.lang.Closure;
 import groovy.lang.GroovyShell;
 import java.io.File;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
+import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -39,9 +43,11 @@ class RuntimeGuardReflectionFileAccessTest {
     }
 
     @Test
-    void classForNameIsRejectedRegardlessOfWhitelist() {
-        // forName is in DENIED_METHODS unconditionally - loading java.io.File by name and
-        // then reflectively instantiating it is the textbook sandbox bypass.
+    void classForNameIsRejectedByDefaultBecauseJavaLangClassIsNotWhitelisted() {
+        // forName is not special-cased by name anywhere in RuntimeGuard - it is denied because
+        // it resolves to java.lang.Class, and that class is never a key in DefaultAllowlist -
+        // loading java.io.File by name and then reflectively instantiating it is the textbook
+        // sandbox bypass.
         GroovyShell shell = GuardedShellFactory.create();
         SecurityException ex = assertThrows(SecurityException.class, () -> shell.evaluate(
                 "Class.forName('java.io.File').getConstructor(String).newInstance('/etc/passwd')"));
@@ -49,12 +55,62 @@ class RuntimeGuardReflectionFileAccessTest {
     }
 
     @Test
-    void getClassIsRejectedSoScriptsCannotPivotToReflection() {
-        // getClass() is the usual first hop toward getClassLoader()/reflection; it is denied
-        // on every receiver, whitelisted or not.
+    void whitelistingJavaLangClassGrantsForNameAndGetClassLoaderToo() {
+        // the whitelist is authoritative, with no hidden per-name override standing behind it:
+        // whitelisting java.lang.Class opens all of it, forName/getClassLoader included, the
+        // same as whitelisting any other class does for its own methods. A deployment that wants
+        // java.lang.Class trusted has to mean it.
+        GuardHolder.set(new RuntimeGuard(Map.of("java.lang.Class", Set.of())));
+        GroovyShell shell = GuardedShellFactory.create();
+
+        assertEquals("java.lang.String", shell.evaluate("String.class.getName()"));
+        assertEquals(File.class, shell.evaluate("Class.forName('java.io.File')"));
+    }
+
+    @Test
+    void restrictingClassToGetNameStillDeniesGetClassLoaderThroughARealCompiledScript() {
+        // end-to-end through GuardedShellFactory/InterceptCustomizer, not just a direct
+        // guard.checkedCall - String is whitelisted with no restriction, java.lang.Class is
+        // whitelisted but restricted to {"getName"} only. String's own unrestricted status has
+        // no bearing on what's allowed on java.lang.Class - getClassLoader()'s declaring class
+        // is java.lang.Class regardless of what value the receiver holds, so it's checked
+        // against Class's own {"getName"} set and loses.
+        GuardHolder.set(new RuntimeGuard(Map.of(
+                "java.lang.String", Set.of(),
+                "java.lang.Class", Set.of("getName"))));
+        GroovyShell shell = GuardedShellFactory.create();
+
+        assertEquals("java.lang.String", shell.evaluate("String.class.getName()"));
+
+        SecurityException ex = assertThrows(SecurityException.class,
+                () -> shell.evaluate("String.class.getClassLoader()"));
+        assertTrue(ex.getMessage().contains("java.lang.Class.getClassLoader"), ex.getMessage());
+    }
+
+    @Test
+    void getClassIsRejectedByDefaultBecauseJavaLangObjectIsNotWhitelisted() {
+        // getClass() is the usual first hop toward getClassLoader()/reflection; it always
+        // resolves to java.lang.Object (verified via pickMethod introspection - it can't be
+        // overridden away from Object), and Object is never a key in DefaultAllowlist.
         GroovyShell shell = GuardedShellFactory.create();
         SecurityException ex = assertThrows(SecurityException.class,
                 () -> shell.evaluate("'hello'.getClass()"));
+        assertTrue(ex.getMessage().contains("getClass"), ex.getMessage());
+    }
+
+    @Test
+    void dynamicallyComputedMethodNameIsCheckedByItsResolvedValueNotItsSourceSpelling() {
+        // ExpressionCheckerVsRuntimeGuardTest.dynamicallyComputedMethodNameDefeatsTheEnhancedDenylistCompletely
+        // shows a compile-time AST checker - even one with a DENIED_METHODS-style denylist -
+        // can't catch this: 'hello'."$n"() compiles to a MethodCallExpression whose method-name
+        // expression is a GString, not a literal it could compare against anything. RuntimeGuard
+        // doesn't care how the name was spelled in the source: InterceptCustomizer passes
+        // whatever expression it is straight through, and RuntimeGuard.checkedCall resolves it
+        // with String.valueOf(methodName) before checking - so it sees the real string
+        // "getClass" regardless of whether the source wrote that literally or computed it.
+        GroovyShell shell = GuardedShellFactory.create();
+        SecurityException ex = assertThrows(SecurityException.class,
+                () -> shell.evaluate("def n = 'getClass'; 'hello'.\"$n\"()"));
         assertTrue(ex.getMessage().contains("getClass"), ex.getMessage());
     }
 
@@ -100,6 +156,28 @@ class RuntimeGuardReflectionFileAccessTest {
         SecurityException ex = assertThrows(SecurityException.class,
                 () -> shell.evaluate("ctor.newInstance('/etc/passwd')"));
         assertTrue(ex.getMessage().contains("java.lang.reflect.Constructor"), ex.getMessage());
+    }
+
+    @Test
+    void methodPointerCaptureIsStillCheckedWhenInvoked() {
+        // f.&exists captures a deferred call rather than invoking exists() immediately. The
+        // script hands the closure back out instead of calling it itself - calling it *inside*
+        // the script wouldn't isolate anything, since that call is its own MethodCallExpression
+        // and goes through the guard regardless of how the closure was built. Invoking the
+        // returned closure from plain Java, with no Groovy compilation involved at all, is what
+        // actually exercises whether construction produced a GuardedMethodClosure or - if
+        // InterceptCustomizer didn't rewrite MethodPointerExpression - a plain, unguarded
+        // groovy.lang.MethodClosure that would just run exists() for real.
+        Binding binding = new Binding();
+        binding.setVariable("f", new File("."));
+        GroovyShell shell = GuardedShellFactory.create(binding);
+
+        Object result = shell.evaluate("f.&exists");
+        assertTrue(result instanceof Closure, "expected a Closure, got " + result);
+        Closure<?> ref = (Closure<?>) result;
+
+        SecurityException ex = assertThrows(SecurityException.class, ref::call);
+        assertTrue(ex.getMessage().contains("java.io.File"), ex.getMessage());
     }
 
     @Test
