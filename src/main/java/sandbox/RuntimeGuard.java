@@ -29,100 +29,42 @@ import org.codehaus.groovy.runtime.MetaClassHelper;
 public final class RuntimeGuard {
 
     /**
-     * Class name -> method names a script may call on it. Checked against the class that
-     * actually declares the resolved method, not the receiver's static/declared type -
-     * otherwise a whitelisted interface could be used to reach an unlisted implementation.
-     * An empty method set means every method on that class is allowed; a class missing from
-     * the map entirely is not allowed at all. {@code Set}, not {@code List} - every lookup
-     * here is a membership check ({@link #isMethodAllowed}), and that's called on every
-     * intercepted call a script makes, so it should be O(1) rather than a linear scan.
-     * Supplied by the caller (see {@link RuntimeGuardConfiguration} for the Spring-wired
-     * default) rather than hardcoded, so different deployments can run different whitelists
-     * without touching this class.
-     *
-     * <p>There is no separate mechanism anywhere in this class for "dangerous" declaring classes
-     * like {@code java.lang.Object}, {@code java.lang.Class}, or {@code groovy.lang.GroovyObject}
-     * - {@code getClass}/{@code getMetaClass}/{@code invokeMethod}/{@code wait}/.../{@code
-     * forName}/{@code getClassLoader} are denied purely because none of those three classes are
-     * ever a key here by default (see {@link DefaultAllowlist}), exactly like any other unlisted
-     * class. If a deployment whitelists one of them, everything it declares becomes callable,
-     * including those - this map is the entire policy for them, with nothing standing behind it
-     * as a fallback.
-     *
-     * <p>{@code groovy.lang.Script} is the one exception, deliberately not governed by this map
-     * at all - see {@link #DENIED_SCRIPT_METHODS} for why.
+     * Class name -> method names a script may call on it, checked against the declaring class of
+     * the resolved method, not the receiver's static type. Empty set = every method allowed;
+     * missing key = nothing allowed. {@code java.lang.Object}/{@code java.lang.Class}/{@code
+     * groovy.lang.GroovyObject} have no special handling - denied only because
+     * {@link DefaultAllowlist} never keys them. {@code groovy.lang.Script} is the one exception,
+     * governed by {@link #DENIED_SCRIPT_METHODS} instead.
      */
     private final Map<String, Set<String>> allowedMethods;
 
     /**
-     * The one name that genuinely can't be gated through {@link #allowedMethods} the way every
-     * other check in this class now is: Groovy's ProcessGroovyMethods registers "execute" as a
-     * GDK extension on String/String[]/List, with declaringClass reported as the receiver type
-     * <i>itself</i> (java.lang.String, not some ProcessGroovyMethods-named class) - found
-     * empirically via direct pickMethod introspection. Whitelisting "java.lang.String" is the
-     * ordinary, expected thing for a deployment to do (it's in {@link DefaultAllowlist}), and
-     * "execute" would silently ride along with the usual "empty set = every method allowed"
-     * convenience - unlike {@code java.lang.Object}/{@code java.lang.Class}/{@code
-     * groovy.lang.Script}, there's no separate, rarely-whitelisted declaring class this could be
-     * pinned to instead; it rides on whatever ordinary, commonly-trusted class the script
-     * receiver already is. This has to stay a true global denylist, checked regardless of
-     * receiver, for exactly that reason.
+     * "execute" (ProcessGroovyMethods, spawns an OS process) reports its declaring class as the
+     * receiver's own type (String/String[]/List), not a pinnable separate class - would ride
+     * along with any whitelisted, commonly-trusted class of that kind, so it stays a true global
+     * denylist.
      */
     private final Set<String> deniedMethods = Set.of("execute");
 
     /**
-     * The whitelist model breaks down specifically for {@code groovy.lang.Script}: a script's
-     * own {@code def foo() {...}} definitions compile as real methods on the compiler-generated
-     * class Groovy names for that one compilation ({@code Script1}, {@code Script2}, ...) - a
-     * fresh, unpredictable name every time, never {@code groovy.lang.Script} or
-     * {@link SecureScript} itself (verified directly: a script calling its own {@code test()}
-     * resolves declaring class to {@code Script1}, and {@code check} rejected it with "Rejected:
-     * Script1.test()" before this existed). No {@link #allowedMethods} entry could ever name that
-     * class in advance, so under the pure whitelist model a script could not call a function it
-     * defines itself - not a narrow gap, a complete block on user-defined script functions calling
-     * each other.
-     *
-     * <p>So {@code groovy.lang.Script} gets the opposite policy from every other class: allowed by
-     * default (this covers the unpredictable generated class, {@link SecureScript}, and anything
-     * hung off it later, uniformly, via {@code Script.class.isAssignableFrom(declaring)} in
-     * {@link #check}), with this denylist for the methods {@code groovy.lang.Script} itself
-     * declares (enumerated via {@code Script.class.getDeclaredMethods()}, not guessed) that a
-     * script has no legitimate reason to call on itself:
+     * {@code groovy.lang.Script} gets a denylist instead of {@link #allowedMethods}: a script's
+     * own {@code def foo(){}} compiles onto a fresh, per-compilation generated class name
+     * ({@code Script1}, ...) no whitelist entry could ever name in advance - the whitelist model
+     * would block a script from calling its own functions entirely. Safe to allow the rest by
+     * default because it's all code {@link InterceptCustomizer} already rewrote at compile time.
      *
      * <ul>
-     * <li>{@code evaluate(String)}/{@code evaluate(File)} - <b>the one that actually matters</b>.
-     * Confirmed empirically, not assumed: {@code evaluate("new java.io.File('/tmp/x').getName()")}
-     * called from inside a guarded script returned {@code "x"} with no exception, proving this
-     * compiles and runs its argument through a brand new, completely unguarded {@code GroovyShell}
-     * - no {@link InterceptCustomizer}, no this class in the loop at all. Every other entry here is
-     * a narrow, specific concern; this one is a total, unrestricted sandbox escape with a single
-     * call, using nothing but a class {@link DefaultAllowlist} already trusts unrestricted
-     * ({@code java.lang.String}) to supply the payload.
-     * <li>{@code getBinding}/{@code setBinding} - read or replace the live {@link
-     * groovy.lang.Binding} the host app wired in, independent of anything the script author wrote.
-     * <li>{@code run()}/{@code run(File, String[])} - re-invokes a whole compiled script body from
-     * the top (the {@code File} overload an arbitrary one); unbounded self-recursion or another
-     * unguarded compile-and-run, not narrowly about reflection, but both share the name "run" this
-     * denylist matches on regardless of which overload resolved.
+     * <li>{@code evaluate(String|File)} - compiles and runs its argument through a brand new,
+     * <b>completely unguarded</b> {@code GroovyShell}. Full sandbox escape, confirmed empirically.
+     * <li>{@code getBinding}/{@code setBinding} - read/replace the host app's live {@link
+     * groovy.lang.Binding}.
+     * <li>{@code run()}/{@code run(File, String[])} - re-runs the whole script body.
      * </ul>
      *
-     * <p>Left out deliberately, checked individually rather than assumed safe:
-     * {@code getProperty}/{@code setProperty}/{@code invokeMethod} - Script does declare its own
-     * overrides, but pickMethod attributes all three to the {@code groovy.lang.GroovyObject}
-     * interface instead (verified directly against a real compiled script, not this class), so
-     * they never take this branch at all - see the {@code java.lang.Object}/{@code
-     * groovy.lang.GroovyObject} case in {@link #allowedMethods}'s Javadoc, which already denies
-     * them by default. {@code print}/{@code println}/{@code printf} only ever write text out, no
-     * object reference in or out. {@code hasSetterMethodFor(String)} returns a bare {@code
-     * boolean} - nothing it does internally can hand a script an object reference it didn't
-     * already have.
-     *
-     * <p>Safe to allow the rest of {@code groovy.lang.Script}'s and every subclass's surface by
-     * default specifically because everything else reachable this way is code
-     * {@link InterceptCustomizer} already rewrote at compile time (the script's own body, whatever
-     * {@link SecureScript} grows to expose) - trusting a script to call itself is not the same as
-     * trusting an arbitrary whitelisted library class. {@code evaluate} was the exception that
-     * proved this assumption needs checking one method at a time, not asserted as a blanket rule.
+     * <p>Not included: {@code getProperty}/{@code setProperty}/{@code invokeMethod} resolve to
+     * {@code groovy.lang.GroovyObject}, not {@code Script} (verified via pickMethod), so
+     * {@link #allowedMethods} governs them instead. {@code print}/{@code println}/{@code printf}
+     * only write text. {@code hasSetterMethodFor} returns a bare {@code boolean}.
      */
     private static final Set<String> DENIED_SCRIPT_METHODS = Set.of("getBinding", "setBinding", "run", "evaluate");
 
