@@ -34,10 +34,20 @@ public final class RuntimeGuard {
      * allowed; missing key = nothing allowed. Also what gates {@code checkedConstructor} - a
      * class is constructible iff it has an entry here. {@code java.lang.Object}/{@code
      * java.lang.Class}/{@code groovy.lang.GroovyObject} have no special handling - denied only
-     * because {@link DefaultAllowlist} never keys them. {@code groovy.lang.Script} is the one
-     * exception, governed by {@link #DENIED_SCRIPT_METHODS} instead.
+     * because nothing keys them by default. {@code groovy.lang.Script} is the one exception,
+     * governed by {@link #DENIED_SCRIPT_METHODS} instead.
      */
     private final Map<String, Set<String>> allowedInstanceMethods;
+
+    /**
+     * Class name -> instance method names denied on it even though {@link #allowedInstanceMethods}
+     * would otherwise allow them - the escape hatch for a method whose declaring class is the same
+     * class a deployment has every ordinary reason to whitelist (e.g. "execute" on
+     * {@code java.lang.String} - see {@link DefaultAllowlist}), so it can't be closed off by simply
+     * leaving that class out of the whitelist. Empty set/missing key = nothing extra denied here;
+     * this map never grants anything by itself.
+     */
+    private final Map<String, Set<String>> deniedInstanceMethods;
 
     /**
      * Same shape as {@link #allowedInstanceMethods}, checked separately for {@code Foo.bar()}
@@ -48,20 +58,16 @@ public final class RuntimeGuard {
      */
     private final Map<String, Set<String>> allowedStaticMethods;
 
-    /**
-     * "execute" (ProcessGroovyMethods, spawns an OS process) reports its declaring class as the
-     * receiver's own type (String/String[]/List), not a pinnable separate class - would ride
-     * along with any whitelisted, commonly-trusted class of that kind, so it stays a true global
-     * denylist.
-     */
-    private final Set<String> deniedMethods = Set.of("execute");
+    /** Static-call counterpart to {@link #deniedInstanceMethods}. */
+    private final Map<String, Set<String>> deniedStaticMethods;
 
     /**
-     * {@code groovy.lang.Script} gets a denylist instead of {@link #allowedMethods}: a script's
-     * own {@code def foo(){}} compiles onto a fresh, per-compilation generated class name
-     * ({@code Script1}, ...) no whitelist entry could ever name in advance - the whitelist model
-     * would block a script from calling its own functions entirely. Safe to allow the rest by
-     * default because it's all code {@link InterceptCustomizer} already rewrote at compile time.
+     * {@code groovy.lang.Script} gets a denylist instead of the {@code allowed*Methods} maps
+     * above: a script's own {@code def foo(){}} compiles onto a fresh, per-compilation generated
+     * class name ({@code Script1}, ...) no whitelist entry could ever name in advance - the
+     * whitelist model would block a script from calling its own functions entirely. Safe to allow
+     * the rest by default because it's all code {@link InterceptCustomizer} already rewrote at
+     * compile time.
      *
      * <ul>
      * <li>{@code evaluate(String|File)} - compiles and runs its argument through a brand new,
@@ -72,20 +78,33 @@ public final class RuntimeGuard {
      * </ul>
      *
      * <p>Not included: {@code getProperty}/{@code setProperty}/{@code invokeMethod} resolve to
-     * {@code groovy.lang.GroovyObject}, not {@code Script} (verified via pickMethod), so
-     * {@link #allowedMethods} governs them instead. {@code print}/{@code println}/{@code printf}
-     * only write text. {@code hasSetterMethodFor} returns a bare {@code boolean}.
+     * {@code groovy.lang.GroovyObject}, not {@code Script} (verified via pickMethod), so the
+     * {@code allowed*Methods} maps govern them instead. {@code print}/{@code println}/{@code
+     * printf} only write text. {@code hasSetterMethodFor} returns a bare {@code boolean}.
+     *
+     * <p>Unlike {@link #deniedInstanceMethods}, this one stays a genuine, fixed Java-level
+     * denylist rather than something a deployment configures - there is no class name a script's
+     * own generated class could ever be addressed by from the outside, so there is nothing for
+     * external configuration to key this on in the first place.
      */
     private static final Set<String> DENIED_SCRIPT_METHODS = Set.of("getBinding", "setBinding", "run", "evaluate");
 
-    /** Convenience: the same whitelist governs both instance and static calls on a class. */
+    /** Convenience: the same whitelist governs both instance and static calls, nothing denied. */
     public RuntimeGuard(Map<String, Set<String>> allowedMethods) {
-        this(allowedMethods, allowedMethods);
+        this(allowedMethods, Map.of(), allowedMethods, Map.of());
     }
 
+    /** Convenience: independent instance/static whitelists, nothing denied. */
     public RuntimeGuard(Map<String, Set<String>> allowedInstanceMethods, Map<String, Set<String>> allowedStaticMethods) {
+        this(allowedInstanceMethods, Map.of(), allowedStaticMethods, Map.of());
+    }
+
+    public RuntimeGuard(Map<String, Set<String>> allowedInstanceMethods, Map<String, Set<String>> deniedInstanceMethods,
+                         Map<String, Set<String>> allowedStaticMethods, Map<String, Set<String>> deniedStaticMethods) {
         this.allowedInstanceMethods = copyOf(allowedInstanceMethods);
+        this.deniedInstanceMethods = copyOf(deniedInstanceMethods);
         this.allowedStaticMethods = copyOf(allowedStaticMethods);
+        this.deniedStaticMethods = copyOf(deniedStaticMethods);
     }
 
     private static Map<String, Set<String>> copyOf(Map<String, Set<String>> methods) {
@@ -182,9 +201,14 @@ public final class RuntimeGuard {
     // ---------------------------------------------------------------- checks
 
     private void check(Class<?> declaring, String name, Class<?>[] argTypes, boolean isStatic) {
-        boolean denied = deniedMethods.contains(name) || (Script.class.isAssignableFrom(declaring)
-                ? DENIED_SCRIPT_METHODS.contains(name)
-                : !isMethodAllowed(isStatic ? allowedStaticMethods : allowedInstanceMethods, declaring, name));
+        boolean denied;
+        if (Script.class.isAssignableFrom(declaring)) {
+            denied = DENIED_SCRIPT_METHODS.contains(name);
+        } else if (isStatic) {
+            denied = isMethodDenied(deniedStaticMethods, declaring, name) || !isMethodAllowed(allowedStaticMethods, declaring, name);
+        } else {
+            denied = isMethodDenied(deniedInstanceMethods, declaring, name) || !isMethodAllowed(allowedInstanceMethods, declaring, name);
+        }
         if (denied) {
             deny(declaring, name, argTypes);
         }
@@ -193,24 +217,32 @@ public final class RuntimeGuard {
     /** Whether {@code c} has an instance-method entry in the whitelist at all - constructors are
      *  gated on this alone, since a constructor isn't a "method name" the method list could name. */
     private boolean isClassAllowed(Class<?> c) {
-        return Objects.nonNull(allowedMethodNames(allowedInstanceMethods, c));
+        return Objects.nonNull(namesFor(allowedInstanceMethods, c));
     }
 
     /** Whether {@code name} may be called on a receiver declaring it in {@code declaring} -
      *  the class must be whitelisted in {@code methods}, and either carry no method-name
      *  restriction (empty set = every method allowed) or explicitly list {@code name}. */
     private boolean isMethodAllowed(Map<String, Set<String>> methods, Class<?> declaring, String name) {
-        Set<String> allowed = allowedMethodNames(methods, declaring);
+        Set<String> allowed = namesFor(methods, declaring);
         return Objects.nonNull(allowed) && (allowed.isEmpty() || allowed.contains(name));
+    }
+
+    /** Whether {@code name} is explicitly denied for {@code declaring} in {@code methods} - unlike
+     *  {@link #isMethodAllowed}, an empty/missing set here means nothing extra is denied, not
+     *  "deny everything"; this map only ever takes away, never grants. */
+    private boolean isMethodDenied(Map<String, Set<String>> methods, Class<?> declaring, String name) {
+        Set<String> denied = namesFor(methods, declaring);
+        return Objects.nonNull(denied) && denied.contains(name);
     }
 
     /**
      * The configured method-name set for {@code c} in {@code methods} - exact class-name match
      * first, falling back to its directly implemented interfaces (so whitelisting
-     * {@code java.util.List} covers any concrete implementation) - or {@code null} if nothing
-     * whitelists it.
+     * {@code java.util.List} covers any concrete implementation) - or {@code null} if {@code
+     * methods} has no entry for it.
      */
-    private Set<String> allowedMethodNames(Map<String, Set<String>> methods, Class<?> c) {
+    private Set<String> namesFor(Map<String, Set<String>> methods, Class<?> c) {
         if (Objects.isNull(c)) return null;
         Set<String> direct = methods.get(c.getName());
         if (Objects.nonNull(direct)) return direct;

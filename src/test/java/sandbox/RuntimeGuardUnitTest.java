@@ -357,4 +357,28 @@ class RuntimeGuardUnitTest {
 
         assertThrows(SecurityException.class, () -> guard.checkedConstructor(ArrayList.class, new Object[]{}));
     }
+
+    @Test
+    void deniedWinsOverAllowedWhenTheSameMethodNameIsListedInBoth() throws Throwable {
+        // a genuine collision, not just "denied is unset" - toUpperCase is explicitly present in
+        // both the allowed and the denied set for the same class, and denied still wins
+        RuntimeGuard guard = new RuntimeGuard(
+                Map.of("java.lang.String", Set.of("toUpperCase")),
+                Map.of("java.lang.String", Set.of("toUpperCase")),
+                Map.of(), Map.of());
+
+        assertThrows(SecurityException.class, () ->
+                guard.checkedCall("hello", false, false, "toUpperCase", new Object[0]));
+
+        // an unrestricted (empty-set) "everything allowed" entry doesn't override denied either
+        RuntimeGuard guardWithOpenAllow = new RuntimeGuard(
+                Map.of("java.lang.String", Set.of()),
+                Map.of("java.lang.String", Set.of("toUpperCase")),
+                Map.of(), Map.of());
+
+        assertThrows(SecurityException.class, () ->
+                guardWithOpenAllow.checkedCall("hello", false, false, "toUpperCase", new Object[0]));
+        // other methods on the same unrestricted entry are unaffected
+        assertEquals("hello", guardWithOpenAllow.checkedCall("HELLO", false, false, "toLowerCase", new Object[0]));
+    }
 }

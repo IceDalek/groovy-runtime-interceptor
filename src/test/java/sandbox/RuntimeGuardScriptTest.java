@@ -74,9 +74,9 @@ class RuntimeGuardScriptTest {
     void stringExecuteExtensionMethodIsRejectedDespiteStringBeingWhitelisted() {
         // Groovy's ProcessGroovyMethods registers execute() as an extension on String, with
         // declaringClass reported as java.lang.String itself - so without "execute" in
-        // RuntimeGuard's deniedMethods, this would launch a real OS process. Must throw before
-        // that happens, not after - otherwise this test spawns a process instead of proving
-        // the check happens.
+        // DefaultAllowlist.deniedInstanceMethods(), this would launch a real OS process. Must
+        // throw before that happens, not after - otherwise this test spawns a process instead of
+        // proving the check happens.
         SecurityException ex = assertThrows(SecurityException.class,
                 () -> shell.evaluate("'whoami'.execute()"));
         assertTrue(ex.getMessage().contains("execute"), ex.getMessage());

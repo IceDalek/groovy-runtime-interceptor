@@ -5,10 +5,12 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-/** The whitelist {@link RuntimeGuard} gets by default, via {@link RuntimeGuardConfiguration}. */
+/** Test-only default whitelist - see {@link TestGuards#fresh()}. {@link RuntimeGuardConfiguration}
+ *  does not use this; it fails closed on a missing/misconfigured property instead. */
 public final class DefaultAllowlist {
 
-    /** No method-name restriction on any of these - every method they declare is callable. */
+    /** No method-name restriction on any of these - every method they declare is callable,
+     *  subject to {@link #deniedInstanceMethods()}. */
     public static Map<String, Set<String>> get() {
         return Stream.of(
                 String.class,
@@ -39,6 +41,18 @@ public final class DefaultAllowlist {
 
                 java.time.LocalDate.class
         ).collect(Collectors.toMap(Class::getName, c -> Set.<String>of()));
+    }
+
+    /**
+     * "execute" (ProcessGroovyMethods, spawns an OS process) resolves its declaring class to the
+     * receiver's own type - java.lang.String or java.util.List, both unrestricted above - so it
+     * has to be clawed back explicitly rather than left implied by omission.
+     */
+    public static Map<String, Set<String>> deniedInstanceMethods() {
+        return Map.of(
+                "java.lang.String", Set.of("execute"),
+                "java.util.List", Set.of("execute")
+        );
     }
 
     private DefaultAllowlist() {}

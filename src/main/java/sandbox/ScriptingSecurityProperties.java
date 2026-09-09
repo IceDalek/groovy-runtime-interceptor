@@ -18,13 +18,13 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 @ConfigurationProperties(prefix = "scripting")
 public class ScriptingSecurityProperties {
 
-    private Map<String, ClassMethodWhitelist> security = new LinkedHashMap<>();
+    private Map<String, ClassSecurityPolicy> security = new LinkedHashMap<>();
 
-    public Map<String, ClassMethodWhitelist> getSecurity() {
+    public Map<String, ClassSecurityPolicy> getSecurity() {
         return security;
     }
 
-    public void setSecurity(Map<String, ClassMethodWhitelist> security) {
+    public void setSecurity(Map<String, ClassSecurityPolicy> security) {
         this.security = security;
     }
 }
