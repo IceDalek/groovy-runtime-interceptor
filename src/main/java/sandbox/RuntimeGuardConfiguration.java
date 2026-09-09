@@ -1,32 +1,47 @@
 package sandbox;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
  * Builds the {@link RuntimeGuard} bean from externalized configuration, e.g.
- * {@code application.yml}:
+ * {@code application.properties}:
  *
  * <pre>
- * sandbox:
- *   allowed-methods:
- *     java.lang.String: []
- *     java.util.List: [add, size]
+ * scripting.security[java.lang.String].instanceMethods[0]=toUpperCase
+ * scripting.security[java.util.List].instanceMethods[0]=add
+ * scripting.security[java.lang.Class].staticMethods[0]=forName
  * </pre>
  *
- * An empty method list means every method on that class is allowed (see {@link RuntimeGuard});
- * a class with no entry at all is not allowed. There's no hardcoded fallback here on purpose -
- * a missing/misconfigured {@code sandbox.allowed-methods} property means an empty map, which
- * means {@link RuntimeGuard} denies everything. Fail closed, not fail open with a default
- * whitelist nobody asked for.
+ * Each class entry has independent {@code instanceMethods}/{@code staticMethods} sets, flattened
+ * here into the two maps {@link RuntimeGuard} takes. Leaving one unset for a class means that
+ * class has no entry in that particular map (nothing allowed there); an explicit empty value
+ * ({@code ...instanceMethods=}) means every method in that category is allowed - see
+ * {@link RuntimeGuard}. There's no hardcoded fallback here on purpose - a missing/misconfigured
+ * {@code scripting.security} property means both maps stay empty, which means {@link RuntimeGuard}
+ * denies everything. Fail closed, not fail open with a default whitelist nobody asked for.
  */
 @Configuration
-@EnableConfigurationProperties(SandboxWhitelistProperties.class)
+@EnableConfigurationProperties(ScriptingSecurityProperties.class)
 public class RuntimeGuardConfiguration {
 
     @Bean(initMethod = "registerAsActiveGuard", destroyMethod = "unregisterAsActiveGuard")
-    public RuntimeGuard runtimeGuard(SandboxWhitelistProperties properties) {
-        return new RuntimeGuard(properties.getAllowedMethods());
+    public RuntimeGuard runtimeGuard(ScriptingSecurityProperties properties) {
+        Map<String, Set<String>> instanceMethods = new LinkedHashMap<>();
+        Map<String, Set<String>> staticMethods = new LinkedHashMap<>();
+        properties.getSecurity().forEach((className, whitelist) -> {
+            if (Objects.nonNull(whitelist.getInstanceMethods())) {
+                instanceMethods.put(className, whitelist.getInstanceMethods());
+            }
+            if (Objects.nonNull(whitelist.getStaticMethods())) {
+                staticMethods.put(className, whitelist.getStaticMethods());
+            }
+        });
+        return new RuntimeGuard(instanceMethods, staticMethods);
     }
 }

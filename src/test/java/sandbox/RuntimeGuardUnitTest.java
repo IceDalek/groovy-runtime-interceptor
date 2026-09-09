@@ -319,4 +319,42 @@ class RuntimeGuardUnitTest {
 
         assertEquals(42, guard.checkedCall(script, false, false, "test", new Object[0]));
     }
+
+    @Test
+    void staticAndInstanceMethodsAreGovernedByIndependentWhitelistMaps() throws Throwable {
+        RuntimeGuard guard = new RuntimeGuard(
+                Map.of("java.time.LocalDate", Set.of()), // instance methods: all allowed
+                Map.of());                                // static methods: nothing whitelisted
+
+        // LocalDate.of(...) is a static factory method - denied, staticMethods has no LocalDate
+        // entry, even though instanceMethods leaves the class completely unrestricted
+        assertThrows(SecurityException.class, () -> guard.checkedCall(
+                java.time.LocalDate.class, false, false, "of", new Object[]{2024, 1, 1}));
+
+        // but a LocalDate instance obtained some other way can still have instance methods called
+        java.time.LocalDate date = java.time.LocalDate.of(2024, 1, 1);
+        assertEquals(2024, guard.checkedCall(date, false, false, "getYear", new Object[0]));
+    }
+
+    @Test
+    void whitelistingOnlyStaticMethodsStillDeniesInstanceMethodsOnTheSameClass() throws Throwable {
+        RuntimeGuard guard = new RuntimeGuard(
+                Map.of(),                                       // instance methods: nothing
+                Map.of("java.lang.Class", Set.of("forName")));  // static: only forName
+
+        Object loaded = guard.checkedCall(Class.class, false, false, "forName", new Object[]{"java.lang.String"});
+        assertEquals(String.class, loaded);
+
+        // getName() is an *instance* method of java.lang.Class - no instanceMethods entry at all
+        assertThrows(SecurityException.class, () -> guard.checkedCall(
+                String.class, false, false, "getName", new Object[0]));
+    }
+
+    @Test
+    void aClassPresentOnlyInStaticMethodsCannotBeConstructed() {
+        // checkedConstructor is gated on the instance-methods map alone
+        RuntimeGuard guard = new RuntimeGuard(Map.of(), Map.of("java.util.ArrayList", Set.of()));
+
+        assertThrows(SecurityException.class, () -> guard.checkedConstructor(ArrayList.class, new Object[]{}));
+    }
 }

@@ -29,14 +29,24 @@ import org.codehaus.groovy.runtime.MetaClassHelper;
 public final class RuntimeGuard {
 
     /**
-     * Class name -> method names a script may call on it, checked against the declaring class of
-     * the resolved method, not the receiver's static type. Empty set = every method allowed;
-     * missing key = nothing allowed. {@code java.lang.Object}/{@code java.lang.Class}/{@code
-     * groovy.lang.GroovyObject} have no special handling - denied only because
-     * {@link DefaultAllowlist} never keys them. {@code groovy.lang.Script} is the one exception,
-     * governed by {@link #DENIED_SCRIPT_METHODS} instead.
+     * Class name -> instance method names a script may call on it, checked against the declaring
+     * class of the resolved method, not the receiver's static type. Empty set = every method
+     * allowed; missing key = nothing allowed. Also what gates {@code checkedConstructor} - a
+     * class is constructible iff it has an entry here. {@code java.lang.Object}/{@code
+     * java.lang.Class}/{@code groovy.lang.GroovyObject} have no special handling - denied only
+     * because {@link DefaultAllowlist} never keys them. {@code groovy.lang.Script} is the one
+     * exception, governed by {@link #DENIED_SCRIPT_METHODS} instead.
      */
-    private final Map<String, Set<String>> allowedMethods;
+    private final Map<String, Set<String>> allowedInstanceMethods;
+
+    /**
+     * Same shape as {@link #allowedInstanceMethods}, checked separately for {@code Foo.bar()}
+     * calls that resolve to a genuine static method of {@code Foo} (see the {@code
+     * receiver instanceof Class} branch in {@link #checkedCall}) and for static-import calls
+     * ({@link #checkedStaticCall}). Independent on purpose - a class can be trusted for its
+     * static methods without every instance of it being constructible, or vice versa.
+     */
+    private final Map<String, Set<String>> allowedStaticMethods;
 
     /**
      * "execute" (ProcessGroovyMethods, spawns an OS process) reports its declaring class as the
@@ -68,8 +78,18 @@ public final class RuntimeGuard {
      */
     private static final Set<String> DENIED_SCRIPT_METHODS = Set.of("getBinding", "setBinding", "run", "evaluate");
 
+    /** Convenience: the same whitelist governs both instance and static calls on a class. */
     public RuntimeGuard(Map<String, Set<String>> allowedMethods) {
-        this.allowedMethods = allowedMethods.entrySet().stream()
+        this(allowedMethods, allowedMethods);
+    }
+
+    public RuntimeGuard(Map<String, Set<String>> allowedInstanceMethods, Map<String, Set<String>> allowedStaticMethods) {
+        this.allowedInstanceMethods = copyOf(allowedInstanceMethods);
+        this.allowedStaticMethods = copyOf(allowedStaticMethods);
+    }
+
+    private static Map<String, Set<String>> copyOf(Map<String, Set<String>> methods) {
+        return methods.entrySet().stream()
                 .collect(Collectors.toUnmodifiableMap(Map.Entry::getKey, e -> Set.copyOf(e.getValue())));
     }
 
@@ -110,7 +130,7 @@ public final class RuntimeGuard {
                 MetaMethod sm = ((MetaClassImpl) mc).retrieveStaticMethod(method, args);
                 if (Objects.nonNull(sm) && sm.isStatic()) {
                     Class<?> declaring = sm.getDeclaringClass().getTheClass();
-                    check(declaring, method, argTypes);
+                    check(declaring, method, argTypes, true);
                     Class<?> target = (declaring == Class.class) ? Class.class : (Class<?>) receiver;
                     return InvokerHelper.invokeStaticMethod(target, method, args);
                 }
@@ -138,14 +158,14 @@ public final class RuntimeGuard {
         }
 
         Class<?> declaring = m.getDeclaringClass().getTheClass();
-        check(declaring, method, argTypes);
+        check(declaring, method, argTypes, false);
         return InvokerHelper.invokeMethod(receiver, method, args);
     }
 
     /** Static imports and some AST replacements. */
     public Object checkedStaticCall(Class<?> type, String method, Object[] args) {
         args = fixNull(args);
-        check(type, method, MetaClassHelper.convertToTypeArray(args));
+        check(type, method, MetaClassHelper.convertToTypeArray(args), true);
         return InvokerHelper.invokeStaticMethod(type, method, args);
     }
 
@@ -161,40 +181,41 @@ public final class RuntimeGuard {
 
     // ---------------------------------------------------------------- checks
 
-    private void check(Class<?> declaring, String name, Class<?>[] argTypes) {
+    private void check(Class<?> declaring, String name, Class<?>[] argTypes, boolean isStatic) {
         boolean denied = deniedMethods.contains(name) || (Script.class.isAssignableFrom(declaring)
                 ? DENIED_SCRIPT_METHODS.contains(name)
-                : !isMethodAllowed(declaring, name));
+                : !isMethodAllowed(isStatic ? allowedStaticMethods : allowedInstanceMethods, declaring, name));
         if (denied) {
             deny(declaring, name, argTypes);
         }
     }
 
-    /** Whether {@code c} has an entry in the whitelist at all - constructors are gated on
-     *  this alone, since a constructor isn't a "method name" the method list could name. */
+    /** Whether {@code c} has an instance-method entry in the whitelist at all - constructors are
+     *  gated on this alone, since a constructor isn't a "method name" the method list could name. */
     private boolean isClassAllowed(Class<?> c) {
-        return Objects.nonNull(allowedMethodNames(c));
+        return Objects.nonNull(allowedMethodNames(allowedInstanceMethods, c));
     }
 
     /** Whether {@code name} may be called on a receiver declaring it in {@code declaring} -
-     *  the class must be whitelisted, and either carry no method-name restriction (empty
-     *  set = every method allowed) or explicitly list {@code name}. */
-    private boolean isMethodAllowed(Class<?> declaring, String name) {
-        Set<String> methods = allowedMethodNames(declaring);
-        return Objects.nonNull(methods) && (methods.isEmpty() || methods.contains(name));
+     *  the class must be whitelisted in {@code methods}, and either carry no method-name
+     *  restriction (empty set = every method allowed) or explicitly list {@code name}. */
+    private boolean isMethodAllowed(Map<String, Set<String>> methods, Class<?> declaring, String name) {
+        Set<String> allowed = allowedMethodNames(methods, declaring);
+        return Objects.nonNull(allowed) && (allowed.isEmpty() || allowed.contains(name));
     }
 
     /**
-     * The configured method-name set for {@code c} - exact class-name match first, falling
-     * back to its directly implemented interfaces (so whitelisting {@code java.util.List}
-     * covers any concrete implementation) - or {@code null} if nothing whitelists it.
+     * The configured method-name set for {@code c} in {@code methods} - exact class-name match
+     * first, falling back to its directly implemented interfaces (so whitelisting
+     * {@code java.util.List} covers any concrete implementation) - or {@code null} if nothing
+     * whitelists it.
      */
-    private Set<String> allowedMethodNames(Class<?> c) {
+    private Set<String> allowedMethodNames(Map<String, Set<String>> methods, Class<?> c) {
         if (Objects.isNull(c)) return null;
-        Set<String> direct = allowedMethods.get(c.getName());
+        Set<String> direct = methods.get(c.getName());
         if (Objects.nonNull(direct)) return direct;
         for (Class<?> i : c.getInterfaces()) {
-            Set<String> viaInterface = allowedMethods.get(i.getName());
+            Set<String> viaInterface = methods.get(i.getName());
             if (Objects.nonNull(viaInterface)) return viaInterface;
         }
         return null;
