@@ -1,18 +1,21 @@
 package sandbox;
 
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 /** Test-only default whitelist - see {@link TestGuards#fresh()}. {@link RuntimeGuardConfiguration}
  *  does not use this; it fails closed on a missing/misconfigured property instead. */
 public final class DefaultAllowlist {
 
-    /** No method-name restriction on any of these - every method they declare is callable,
-     *  subject to {@link #deniedInstanceMethods()}. */
-    public static Map<String, Set<String>> get() {
-        return Stream.of(
+    /** No method-name restriction on any of these - every instance/static method they declare
+     *  is callable, except "execute" (ProcessGroovyMethods, spawns an OS process) on
+     *  java.lang.String/java.util.List, which resolves its declaring class to the receiver's own
+     *  type and so has to be clawed back explicitly rather than left implied by omission. */
+    public static Map<String, ClassSecurityPolicy> get() {
+        Map<String, ClassSecurityPolicy> security = new LinkedHashMap<>();
+        for (Class<?> c : List.of(
                 String.class,
                 Integer.class,
                 Long.class,
@@ -39,20 +42,20 @@ public final class DefaultAllowlist {
                 java.util.Collection.class,
                 java.lang.CharSequence.class,
 
-                java.time.LocalDate.class
-        ).collect(Collectors.toMap(Class::getName, c -> Set.<String>of()));
+                java.time.LocalDate.class)) {
+            security.put(c.getName(), unrestricted());
+        }
+        security.get("java.lang.String").getInstanceMethods().setDenied(Set.of("execute"));
+        security.get("java.util.List").getInstanceMethods().setDenied(Set.of("execute"));
+        return security;
     }
 
-    /**
-     * "execute" (ProcessGroovyMethods, spawns an OS process) resolves its declaring class to the
-     * receiver's own type - java.lang.String or java.util.List, both unrestricted above - so it
-     * has to be clawed back explicitly rather than left implied by omission.
-     */
-    public static Map<String, Set<String>> deniedInstanceMethods() {
-        return Map.of(
-                "java.lang.String", Set.of("execute"),
-                "java.util.List", Set.of("execute")
-        );
+    private static ClassSecurityPolicy unrestricted() {
+        MethodAccessPolicy instanceMethods = new MethodAccessPolicy();
+        instanceMethods.setAllowed(Set.of());
+        MethodAccessPolicy staticMethods = new MethodAccessPolicy();
+        staticMethods.setAllowed(Set.of());
+        return new ClassSecurityPolicy(instanceMethods, staticMethods);
     }
 
     private DefaultAllowlist() {}

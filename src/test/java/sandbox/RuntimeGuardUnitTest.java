@@ -11,6 +11,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static sandbox.TestGuards.instancePolicy;
+import static sandbox.TestGuards.staticPolicy;
 
 /**
  * Exercises a {@link RuntimeGuard} instance's API directly, without going through the
@@ -60,10 +62,11 @@ class RuntimeGuardUnitTest {
         // with nothing invoked): Groovy's ProcessGroovyMethods.execute(...) extension method -
         // which launches a real OS process - reports its declaring class as java.lang.String
         // itself, not some ProcessGroovyMethods-named class. String has an unrestricted
-        // (empty-set) entry in DefaultAllowlist, so without this in deniedMethods, "execute"
-        // would have ridden along for free on any whitelist that leaves String unrestricted.
-        // This must throw before InvokerHelper.invokeMethod ever runs - if it didn't, this
-        // test would actually spawn a process instead of just proving the check happens.
+        // (empty-set) entry in DefaultAllowlist, so without this explicitly denied there,
+        // "execute" would have ridden along for free on any whitelist that leaves String
+        // unrestricted. This must throw before InvokerHelper.invokeMethod ever runs - if it
+        // didn't, this test would actually spawn a process instead of just proving the check
+        // happens.
         assertThrows(SecurityException.class,
                 () -> guard.checkedCall("whoami", false, false, "execute", new Object[0]));
     }
@@ -87,7 +90,7 @@ class RuntimeGuardUnitTest {
     void allowedMethodsComesFromTheConstructorNotAHardcodedList() throws Throwable {
         // a whitelist with only ArrayList on it (unrestricted) - proves the map passed to the
         // constructor is what actually governs, not something still baked into the class
-        RuntimeGuard narrow = new RuntimeGuard(Map.of("java.util.ArrayList", Set.of()));
+        RuntimeGuard narrow = new RuntimeGuard(Map.of("java.util.ArrayList", instancePolicy(Set.of(), null)));
 
         Object result = narrow.checkedConstructor(ArrayList.class, new Object[]{});
         assertEquals(new ArrayList<>(), result);
@@ -99,7 +102,7 @@ class RuntimeGuardUnitTest {
 
     @Test
     void emptyMethodListMeansEveryMethodOnThatClassIsAllowed() throws Throwable {
-        RuntimeGuard guard = new RuntimeGuard(Map.of("java.lang.String", Set.of()));
+        RuntimeGuard guard = new RuntimeGuard(Map.of("java.lang.String", instancePolicy(Set.of(), null)));
 
         assertEquals("HELLO", guard.checkedCall("hello", false, false, "toUpperCase", new Object[0]));
         assertEquals("hello", guard.checkedCall("HELLO", false, false, "toLowerCase", new Object[0]));
@@ -107,7 +110,7 @@ class RuntimeGuardUnitTest {
 
     @Test
     void nonEmptyMethodListOnlyAllowsTheNamedMethods() throws Throwable {
-        RuntimeGuard guard = new RuntimeGuard(Map.of("java.lang.String", Set.of("toUpperCase")));
+        RuntimeGuard guard = new RuntimeGuard(Map.of("java.lang.String", instancePolicy(Set.of("toUpperCase"), null)));
 
         assertEquals("HELLO", guard.checkedCall("hello", false, false, "toUpperCase", new Object[0]));
         assertThrows(SecurityException.class,
@@ -123,8 +126,8 @@ class RuntimeGuardUnitTest {
         // in DefaultAllowlist, Groovy's MOP reports add()/size() on an ArrayList as declared by
         // the List interface, not by ArrayList itself - verified directly (same as collect()).
         // ArrayList still counts as "allowed" for construction via the one-level interface
-        // fallback in allowedMethodNames(), since ArrayList directly implements List.
-        RuntimeGuard guard = new RuntimeGuard(Map.of("java.util.List", Set.of("add")));
+        // fallback in policyFor(), since ArrayList directly implements List.
+        RuntimeGuard guard = new RuntimeGuard(Map.of("java.util.List", instancePolicy(Set.of("add"), null)));
 
         Object list = guard.checkedConstructor(ArrayList.class, new Object[]{});
         assertEquals(new ArrayList<>(), list);
@@ -137,7 +140,7 @@ class RuntimeGuardUnitTest {
 
     @Test
     void classMissingFromTheMapEntirelyIsDeniedEvenWithNoMethodRestriction() {
-        RuntimeGuard guard = new RuntimeGuard(Map.of("java.lang.String", Set.of()));
+        RuntimeGuard guard = new RuntimeGuard(Map.of("java.lang.String", instancePolicy(Set.of(), null)));
 
         assertThrows(SecurityException.class,
                 () -> guard.checkedConstructor(ArrayList.class, new Object[]{}));
@@ -148,7 +151,7 @@ class RuntimeGuardUnitTest {
     // notifyAll/finalize, forName/getClassLoader, getBinding/setBinding are not special-cased
     // by name anywhere in RuntimeGuard - each is gated purely by whether its own declaring
     // class (java.lang.Object, groovy.lang.GroovyObject, java.lang.Class, groovy.lang.Script)
-    // is a key in allowedMethods, exactly like any other method. Denied by default because
+    // is a key in the whitelist, exactly like any other method. Denied by default because
     // none of those four classes are ever in DefaultAllowlist; ALLOWED the moment a deployment
     // whitelists one of them - there is no hidden override standing between the whitelist and
     // what a script can call. The pairs below prove both halves of that for each class.
@@ -177,7 +180,7 @@ class RuntimeGuardUnitTest {
         // the whitelist is authoritative - "empty set = every method allowed" on Object means
         // every method Object declares, full stop, including the MOP-escape ones. No name in
         // RuntimeGuard overrides that once a deployment makes this choice.
-        RuntimeGuard guard = new RuntimeGuard(Map.of("java.lang.Object", Set.of()));
+        RuntimeGuard guard = new RuntimeGuard(Map.of("java.lang.Object", instancePolicy(Set.of(), null)));
         Object o = new Object();
 
         assertEquals(Object.class, guard.checkedCall(o, false, false, "getClass", new Object[0]));
@@ -200,7 +203,7 @@ class RuntimeGuardUnitTest {
 
     @Test
     void whitelistingGroovyObjectGrantsGetMetaClassOnAScript() throws Throwable {
-        RuntimeGuard guard = new RuntimeGuard(Map.of("groovy.lang.GroovyObject", Set.of()));
+        RuntimeGuard guard = new RuntimeGuard(Map.of("groovy.lang.GroovyObject", instancePolicy(Set.of(), null)));
         Script script = new Script() {
             @Override public Object run() { return null; }
         };
@@ -215,10 +218,10 @@ class RuntimeGuardUnitTest {
     @Test
     void getPropertySetPropertyAndInvokeMethodAreGovernedByTheGroovyObjectWhitelistEntryWithFullGranularity() throws Throwable {
         // answers precisely: yes, unlike getBinding/setBinding/run/evaluate (always denied,
-        // DENIED_SCRIPT_METHODS), these three are ordinary allowedMethods entries under
+        // DENIED_SCRIPT_METHODS), these three are ordinary whitelist entries under
         // "groovy.lang.GroovyObject" - a *restricted* set (not empty-set-means-everything) proves
         // real per-method granularity, not just an on/off switch
-        RuntimeGuard guard = new RuntimeGuard(Map.of("groovy.lang.GroovyObject", Set.of("getProperty")));
+        RuntimeGuard guard = new RuntimeGuard(Map.of("groovy.lang.GroovyObject", instancePolicy(Set.of("getProperty"), null)));
         class ScriptWithFoo extends Script {
             @Override public Object run() { return null; }
             public int getFoo() { return 7; }
@@ -251,8 +254,11 @@ class RuntimeGuardUnitTest {
     @Test
     void whitelistingJavaLangClassGrantsForNameAndGetClassLoaderToo() throws Throwable {
         // proves this isn't a backdoor way of banning forName/getClassLoader specifically -
-        // whitelisting java.lang.Class opens all of it, the same as whitelisting any other class
-        RuntimeGuard guard = new RuntimeGuard(Map.of("java.lang.Class", Set.of()));
+        // whitelisting java.lang.Class opens all of it, the same as whitelisting any other class.
+        // Class is whitelisted for both instance and static calls here, since getName() is an
+        // instance method of Class while forName() is static.
+        RuntimeGuard guard = new RuntimeGuard(Map.of("java.lang.Class",
+                new ClassSecurityPolicy(new MethodAccessPolicy(Set.of(), null), new MethodAccessPolicy(Set.of(), null))));
 
         assertEquals("java.lang.String",
                 guard.checkedCall(String.class, false, false, "getName", new Object[0]));
@@ -268,8 +274,8 @@ class RuntimeGuardUnitTest {
         // *value* here is String.class), so it's checked against Class's own {"getName"} set,
         // not String's empty-set-means-everything one.
         RuntimeGuard guard = new RuntimeGuard(Map.of(
-                "java.lang.String", Set.of(),
-                "java.lang.Class", Set.of("getName")));
+                "java.lang.String", instancePolicy(Set.of(), null),
+                "java.lang.Class", instancePolicy(Set.of("getName"), null)));
 
         assertEquals("java.lang.String", guard.checkedCall(String.class, false, false, "getName", new Object[0]));
 
@@ -280,11 +286,11 @@ class RuntimeGuardUnitTest {
 
     @Test
     void scriptBindingRunAndEvaluateAreDeniedUnconditionallyRegardlessOfWhitelist() {
-        // groovy.lang.Script is deliberately not governed by allowedMethods at all (see
+        // groovy.lang.Script is deliberately not governed by the whitelist at all (see
         // RuntimeGuard.DENIED_SCRIPT_METHODS) - so unlike every other class in this test file,
         // whitelisting "groovy.lang.Script" does NOT change this outcome. Proven by using a
         // guard that whitelists it wide open, not the default TestGuards.fresh() instance.
-        RuntimeGuard guard = new RuntimeGuard(Map.of("groovy.lang.Script", Set.of()));
+        RuntimeGuard guard = new RuntimeGuard(Map.of("groovy.lang.Script", instancePolicy(Set.of(), null)));
         Script script = new Script() {
             @Override public Object run() { return null; }
         };
@@ -306,7 +312,7 @@ class RuntimeGuardUnitTest {
     @Test
     void aScriptSubclassMethodOtherThanTheDeniedThreeIsAllowedByDefaultWithNoWhitelistEntryAtAll() throws Throwable {
         // the whole reason DENIED_SCRIPT_METHODS exists instead of governing Script through
-        // allowedMethods like every other class: a script's own def foo(){...} compiles onto a
+        // the whitelist like every other class: a script's own def foo(){...} compiles onto a
         // fresh, compiler-generated class name every time (Script1, Script2, ...) that no
         // whitelist entry could ever name in advance. Simulated here with a hand-written Script
         // subclass method standing in for a user-defined script function - guard is TestGuards
@@ -321,13 +327,12 @@ class RuntimeGuardUnitTest {
     }
 
     @Test
-    void staticAndInstanceMethodsAreGovernedByIndependentWhitelistMaps() throws Throwable {
-        RuntimeGuard guard = new RuntimeGuard(
-                Map.of("java.time.LocalDate", Set.of()), // instance methods: all allowed
-                Map.of());                                // static methods: nothing whitelisted
+    void staticAndInstanceMethodsAreGovernedByIndependentPolicies() throws Throwable {
+        // instanceMethods allowed (unrestricted), staticMethods left null entirely
+        RuntimeGuard guard = new RuntimeGuard(Map.of("java.time.LocalDate", instancePolicy(Set.of(), null)));
 
-        // LocalDate.of(...) is a static factory method - denied, staticMethods has no LocalDate
-        // entry, even though instanceMethods leaves the class completely unrestricted
+        // LocalDate.of(...) is a static factory method - denied, staticMethods has no entry at
+        // all for LocalDate, even though instanceMethods leaves the class completely unrestricted
         assertThrows(SecurityException.class, () -> guard.checkedCall(
                 java.time.LocalDate.class, false, false, "of", new Object[]{2024, 1, 1}));
 
@@ -338,22 +343,20 @@ class RuntimeGuardUnitTest {
 
     @Test
     void whitelistingOnlyStaticMethodsStillDeniesInstanceMethodsOnTheSameClass() throws Throwable {
-        RuntimeGuard guard = new RuntimeGuard(
-                Map.of(),                                       // instance methods: nothing
-                Map.of("java.lang.Class", Set.of("forName")));  // static: only forName
+        RuntimeGuard guard = new RuntimeGuard(Map.of("java.lang.Class", staticPolicy(Set.of("forName"), null)));
 
         Object loaded = guard.checkedCall(Class.class, false, false, "forName", new Object[]{"java.lang.String"});
         assertEquals(String.class, loaded);
 
-        // getName() is an *instance* method of java.lang.Class - no instanceMethods entry at all
+        // getName() is an *instance* method of java.lang.Class - instanceMethods is null here
         assertThrows(SecurityException.class, () -> guard.checkedCall(
                 String.class, false, false, "getName", new Object[0]));
     }
 
     @Test
     void aClassPresentOnlyInStaticMethodsCannotBeConstructed() {
-        // checkedConstructor is gated on the instance-methods map alone
-        RuntimeGuard guard = new RuntimeGuard(Map.of(), Map.of("java.util.ArrayList", Set.of()));
+        // checkedConstructor is gated on instanceMethods alone
+        RuntimeGuard guard = new RuntimeGuard(Map.of("java.util.ArrayList", staticPolicy(Set.of(), null)));
 
         assertThrows(SecurityException.class, () -> guard.checkedConstructor(ArrayList.class, new Object[]{}));
     }
@@ -362,23 +365,32 @@ class RuntimeGuardUnitTest {
     void deniedWinsOverAllowedWhenTheSameMethodNameIsListedInBoth() throws Throwable {
         // a genuine collision, not just "denied is unset" - toUpperCase is explicitly present in
         // both the allowed and the denied set for the same class, and denied still wins
-        RuntimeGuard guard = new RuntimeGuard(
-                Map.of("java.lang.String", Set.of("toUpperCase")),
-                Map.of("java.lang.String", Set.of("toUpperCase")),
-                Map.of(), Map.of());
+        RuntimeGuard guard = new RuntimeGuard(Map.of(
+                "java.lang.String", instancePolicy(Set.of("toUpperCase"), Set.of("toUpperCase"))));
 
         assertThrows(SecurityException.class, () ->
                 guard.checkedCall("hello", false, false, "toUpperCase", new Object[0]));
 
         // an unrestricted (empty-set) "everything allowed" entry doesn't override denied either
-        RuntimeGuard guardWithOpenAllow = new RuntimeGuard(
-                Map.of("java.lang.String", Set.of()),
-                Map.of("java.lang.String", Set.of("toUpperCase")),
-                Map.of(), Map.of());
+        RuntimeGuard guardWithOpenAllow = new RuntimeGuard(Map.of(
+                "java.lang.String", instancePolicy(Set.of(), Set.of("toUpperCase"))));
 
         assertThrows(SecurityException.class, () ->
                 guardWithOpenAllow.checkedCall("hello", false, false, "toUpperCase", new Object[0]));
         // other methods on the same unrestricted entry are unaffected
         assertEquals("hello", guardWithOpenAllow.checkedCall("HELLO", false, false, "toLowerCase", new Object[0]));
+    }
+
+    @Test
+    void aClassSecurityPolicyWithNoStaticMethodsEntryDeniesStaticCallsEvenWithInstanceMethodsWideOpen() {
+        // exactly the shape a real Spring context binds when a class entry only configures
+        // instanceMethods - ClassSecurityPolicy.getStaticMethods() comes back null, not a
+        // default-valued MethodAccessPolicy (constructor binding, verified directly against a
+        // real ApplicationContext, not assumed).
+        RuntimeGuard guard = new RuntimeGuard(Map.of("java.lang.Class", instancePolicy(Set.of("getName"), null)));
+
+        assertEquals("java.lang.String", guard.checkedCall(String.class, false, false, "getName", new Object[0]));
+        assertThrows(SecurityException.class, () -> guard.checkedCall(
+                Class.class, false, false, "forName", new Object[]{"java.lang.String"}));
     }
 }

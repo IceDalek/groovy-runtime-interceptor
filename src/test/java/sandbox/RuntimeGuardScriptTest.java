@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static sandbox.TestGuards.instancePolicy;
 
 /**
  * End-to-end: script text -> InterceptCustomizer -> RuntimeGuard, through a real GroovyShell.
@@ -143,9 +144,9 @@ class RuntimeGuardScriptTest {
     void scriptCannotReadOrReplaceOrReRunItsOwnBindingRegardlessOfWhitelist() {
         // getBinding/setBinding/run/evaluate are declared on groovy.lang.Script itself and are
         // denied unconditionally (RuntimeGuard.DENIED_SCRIPT_METHODS) - unlike every other class,
-        // groovy.lang.Script is not governed by the allowedMethods whitelist at all, so
+        // groovy.lang.Script is not governed by the whitelist at all, so
         // whitelisting it (done here, wide open) does not change this outcome.
-        GuardHolder.set(new RuntimeGuard(Map.of("groovy.lang.Script", Set.of())));
+        GuardHolder.set(new RuntimeGuard(Map.of("groovy.lang.Script", instancePolicy(Set.of(), null))));
         GroovyShell shell = GuardedShellFactory.create();
 
         SecurityException ex = assertThrows(SecurityException.class, () -> shell.evaluate("getBinding()"));
@@ -169,7 +170,7 @@ class RuntimeGuardScriptTest {
         // the guard held; the payload itself is inert (never touches disk). One call away from a
         // full sandbox escape using nothing but java.lang.String, which DefaultAllowlist already
         // trusts unrestricted - the most dangerous entry in DENIED_SCRIPT_METHODS by far.
-        GuardHolder.set(new RuntimeGuard(Map.of("groovy.lang.Script", Set.of())));
+        GuardHolder.set(new RuntimeGuard(Map.of("groovy.lang.Script", instancePolicy(Set.of(), null))));
         GroovyShell shell = GuardedShellFactory.create();
 
         SecurityException ex = assertThrows(SecurityException.class,
@@ -201,7 +202,7 @@ class RuntimeGuardScriptTest {
 
     @Test
     void whitelistingGroovyObjectGrantsGetMetaClassOnAScriptToo() {
-        GuardHolder.set(new RuntimeGuard(Map.of("groovy.lang.GroovyObject", Set.of())));
+        GuardHolder.set(new RuntimeGuard(Map.of("groovy.lang.GroovyObject", instancePolicy(Set.of(), null))));
         GroovyShell shell = GuardedShellFactory.create();
 
         assertTrue(shell.evaluate("getMetaClass()") instanceof groovy.lang.MetaClass);
@@ -215,7 +216,7 @@ class RuntimeGuardScriptTest {
         // this whitelist entry and DENIED_SCRIPT_METHODS are two independent mechanisms.
         Binding binding = new Binding();
         binding.setVariable("foo", 7); // Script.getProperty falls back to the Binding for this
-        GuardHolder.set(new RuntimeGuard(Map.of("groovy.lang.GroovyObject", Set.of("getProperty"))));
+        GuardHolder.set(new RuntimeGuard(Map.of("groovy.lang.GroovyObject", instancePolicy(Set.of("getProperty"), null))));
         GroovyShell shell = GuardedShellFactory.create(binding);
 
         assertEquals(7, shell.evaluate("getProperty('foo')"));

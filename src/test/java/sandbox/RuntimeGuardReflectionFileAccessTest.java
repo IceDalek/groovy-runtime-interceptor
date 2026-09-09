@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static sandbox.TestGuards.instancePolicy;
 
 /**
  * File access is not itself special-cased anywhere in {@link RuntimeGuard} - it is denied
@@ -59,8 +60,10 @@ class RuntimeGuardReflectionFileAccessTest {
         // the whitelist is authoritative, with no hidden per-name override standing behind it:
         // whitelisting java.lang.Class opens all of it, forName/getClassLoader included, the
         // same as whitelisting any other class does for its own methods. A deployment that wants
-        // java.lang.Class trusted has to mean it.
-        GuardHolder.set(new RuntimeGuard(Map.of("java.lang.Class", Set.of())));
+        // java.lang.Class trusted has to mean it. Whitelisted for both instance and static
+        // calls, since getName() is an instance method of Class while forName() is static.
+        GuardHolder.set(new RuntimeGuard(Map.of("java.lang.Class",
+                new ClassSecurityPolicy(new MethodAccessPolicy(Set.of(), null), new MethodAccessPolicy(Set.of(), null)))));
         GroovyShell shell = GuardedShellFactory.create();
 
         assertEquals("java.lang.String", shell.evaluate("String.class.getName()"));
@@ -76,8 +79,8 @@ class RuntimeGuardReflectionFileAccessTest {
         // is java.lang.Class regardless of what value the receiver holds, so it's checked
         // against Class's own {"getName"} set and loses.
         GuardHolder.set(new RuntimeGuard(Map.of(
-                "java.lang.String", Set.of(),
-                "java.lang.Class", Set.of("getName"))));
+                "java.lang.String", instancePolicy(Set.of(), null),
+                "java.lang.Class", instancePolicy(Set.of("getName"), null))));
         GroovyShell shell = GuardedShellFactory.create();
 
         assertEquals("java.lang.String", shell.evaluate("String.class.getName()"));

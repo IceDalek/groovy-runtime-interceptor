@@ -20,6 +20,7 @@
         <!-- matches spring.version above: this is the spring-boot release built against
              Spring Framework 6.1.13. -->
         <spring-boot.version>3.3.4</spring-boot.version>
+        <lombok.version>1.18.34</lombok.version>
     </properties>
 
     <dependencies>
@@ -50,6 +51,13 @@
             <artifactId>commons-lang3</artifactId>
             <version>3.17.0</version>
         </dependency>
+        <!-- annotation-processor only, for ClassSecurityPolicy's @RequiredArgsConstructor -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <version>${lombok.version}</version>
+            <scope>provided</scope>
+        </dependency>
 
         <dependency>
             <groupId>org.junit.jupiter</groupId>
@@ -67,6 +75,9 @@
                 <version>3.13.0</version>
                 <configuration>
                     <release>${maven.compiler.release}</release>
+                    <!-- Spring's @ConfigurationProperties constructor binding needs real
+                         parameter names to match them against property keys -->
+                    <parameters>true</parameters>
                 </configuration>
             </plugin>
 
