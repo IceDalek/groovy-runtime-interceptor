@@ -184,6 +184,23 @@ class RuntimeGuardReflectionFileAccessTest {
     }
 
     @Test
+    void methodPointerCaptureIsStillCheckedWhenInvokedFromWithinTheScriptItself() {
+        // companion to the test above: now that RuntimeGuard.checkedCall never checks the
+        // invocation of a Closure receiver (see the "call"/"doCall" special case), a script can
+        // call ref() directly too, unlike a script's own closures which were only ever blocked
+        // by an unrelated declaring-class quirk. Safe here for the same reason as always -
+        // GuardedMethodClosure.doCall itself calls GuardHolder.get().checkedCall(getOwner(), ...)
+        // on the real target, regardless of how doCall got triggered.
+        Binding binding = new Binding();
+        binding.setVariable("f", new File("."));
+        GroovyShell shell = GuardedShellFactory.create(binding);
+
+        SecurityException ex = assertThrows(SecurityException.class,
+                () -> shell.evaluate("def ref = f.&exists; ref()"));
+        assertTrue(ex.getMessage().contains("java.io.File"), ex.getMessage());
+    }
+
+    @Test
     void preBoundFileInstanceIsDeniedByDefaultEvenForHarmlessMethods() {
         // The model is default-deny, not "block dangerous methods": a File that reached the
         // script by some other means still can't have any method called on it, because File

@@ -81,9 +81,19 @@ public final class RuntimeGuard {
             }
         }
 
-        // Closures dispatch through owner/delegate; check the real target, otherwise
-        // { -> delegate = System; exit(-1) }() would slip past the whitelist.
         if (receiver instanceof Closure) {
+            // Invoking the closure itself ("call"/"doCall", however the script spelled it -
+            // c(), c.call(), c.doCall()) needs no check here: its declaring class would
+            // otherwise be an unpredictable, per-compilation generated name
+            // (Script1$_run_closure1, ...) no whitelist could ever name, but that's not a gap -
+            // the closure's own body was already rewritten by InterceptCustomizer at compile
+            // time (see the ClosureExpression case above), so whatever it does once running is
+            // still fully checked regardless of how it got invoked.
+            if ("call".equals(method) || "doCall".equals(method)) {
+                return InvokerHelper.invokeMethod(receiver, method, args);
+            }
+            // Any other method name dispatches through owner/delegate; check the real target,
+            // otherwise { -> delegate = dir }; c.exists() would slip past the whitelist.
             if (Objects.isNull(InvokerHelper.getMetaClass(receiver).pickMethod(method, argTypes))) {
                 for (Object target : closureTargets((Closure<?>) receiver)) {
                     if (Objects.nonNull(InvokerHelper.getMetaClass(target).pickMethod(method, argTypes))) {
@@ -134,16 +144,43 @@ public final class RuntimeGuard {
         }
     }
 
-    /** Whether {@code c} has an instance-method entry in the whitelist at all - constructors are
-     *  gated on this alone, since a constructor isn't a "method name" the method list could name. */
+    /**
+     * Whether {@code c} has an instance-method entry in the whitelist at all - constructors are
+     * gated on this alone, since a constructor isn't a "method name" the method list could name.
+     * Falls back to {@code c}'s directly implemented interfaces (so whitelisting {@code
+     * java.util.List} covers constructing any concrete implementation) - safe here specifically
+     * because this check only ever answers "is this class constructible", never "which methods
+     * are allowed on it": whatever gets constructed still has every one of ITS OWN calls checked
+     * separately afterward.
+     */
     private boolean isClassAllowed(Class<?> c) {
-        ClassSecurityPolicy policy = policyFor(c);
-        return Objects.nonNull(policy) && Objects.nonNull(policy.getInstanceMethods());
+        if (Objects.isNull(c)) return false;
+        if (Objects.nonNull(security.get(c.getName()))) {
+            return Objects.nonNull(security.get(c.getName()).getInstanceMethods());
+        }
+        for (Class<?> i : c.getInterfaces()) {
+            ClassSecurityPolicy viaInterface = security.get(i.getName());
+            if (Objects.nonNull(viaInterface) && Objects.nonNull(viaInterface.getInstanceMethods())) {
+                return true;
+            }
+        }
+        return false;
     }
 
-    /** Whether {@code name} may be called on a receiver declaring it in {@code declaring} -
-     *  the class must be whitelisted, and either carry no method-name restriction (empty set =
-     *  every method allowed) or explicitly list {@code name}. */
+    /**
+     * Whether {@code name} may be called on a receiver declaring it in {@code declaring} - the
+     * class must be whitelisted, and either carry no method-name restriction (empty set = every
+     * method allowed) or explicitly list {@code name}. Exact class-name match only, deliberately
+     * no interface fallback here - unlike construction, "declaring" is already the class Groovy's
+     * own MOP says actually provides this method (see {@link #checkedCall}), so a GDK extension
+     * like {@code collect()} already resolves straight to {@code java.lang.Iterable} without
+     * needing one; falling back through interfaces here would instead mean an unrestricted
+     * ({@code allowed} empty) entry on some whitelisted interface grants <i>every</i> method of
+     * any class that happens to implement it, including ones with nothing to do with that
+     * interface - confirmed concretely: with only {@code java.lang.CharSequence} whitelisted
+     * (empty set), a bound {@code StringBuilder} (never itself whitelisted) could call {@code
+     * append}/{@code insert}/{@code reverse}, none of which {@code CharSequence} declares.
+     */
     private boolean isMethodAllowed(Class<?> declaring, String name, boolean isStatic) {
         MethodAccessPolicy methods = methodsFor(declaring, isStatic);
         Set<String> allowed = Objects.isNull(methods) ? null : methods.getAllowed();
@@ -160,25 +197,9 @@ public final class RuntimeGuard {
     }
 
     private MethodAccessPolicy methodsFor(Class<?> declaring, boolean isStatic) {
-        ClassSecurityPolicy policy = policyFor(declaring);
+        ClassSecurityPolicy policy = Objects.isNull(declaring) ? null : security.get(declaring.getName());
         if (Objects.isNull(policy)) return null;
         return isStatic ? policy.getStaticMethods() : policy.getInstanceMethods();
-    }
-
-    /**
-     * The whitelist entry for {@code c} - exact class-name match first, falling back to its
-     * directly implemented interfaces (so whitelisting {@code java.util.List} covers any
-     * concrete implementation) - or {@code null} if {@link #security} has no entry for it.
-     */
-    private ClassSecurityPolicy policyFor(Class<?> c) {
-        if (Objects.isNull(c)) return null;
-        ClassSecurityPolicy direct = security.get(c.getName());
-        if (Objects.nonNull(direct)) return direct;
-        for (Class<?> i : c.getInterfaces()) {
-            ClassSecurityPolicy viaInterface = security.get(i.getName());
-            if (Objects.nonNull(viaInterface)) return viaInterface;
-        }
-        return null;
     }
 
     private void deny(Class<?> owner, String name, Class<?>[] argTypes) {

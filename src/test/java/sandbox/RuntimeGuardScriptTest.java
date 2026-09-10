@@ -53,6 +53,25 @@ class RuntimeGuardScriptTest {
     }
 
     @Test
+    void interfaceFallbackDoesNotLeakAWholeUnwhitelistedClassThroughARealCompiledScript() {
+        // end-to-end through GuardedShellFactory/InterceptCustomizer, not guard.checkedCall
+        // directly - whitelisting java.lang.CharSequence unrestricted must not hand out
+        // StringBuilder's own append()/insert()/reverse() just because StringBuilder implements
+        // CharSequence; those are declared by StringBuilder itself, never whitelisted directly.
+        Binding binding = new Binding();
+        binding.setVariable("sb", new StringBuilder("hello"));
+        GuardHolder.set(new RuntimeGuard(Map.of("java.lang.CharSequence", instancePolicy(Set.of(), null))));
+        GroovyShell shell = GuardedShellFactory.create(binding);
+
+        // CharSequence-declared methods still work
+        assertEquals('h', shell.evaluate("sb.charAt(0)"));
+
+        // StringBuilder's own methods do not ride along via the interface fallback
+        SecurityException ex = assertThrows(SecurityException.class, () -> shell.evaluate("sb.append(' world')"));
+        assertTrue(ex.getMessage().contains("java.lang.StringBuilder.append"), ex.getMessage());
+    }
+
+    @Test
     void whitelistedConstructorWorks() {
         Object result = shell.evaluate("def l = new ArrayList(); l.add('x'); l");
         assertEquals(List.of("x"), result);

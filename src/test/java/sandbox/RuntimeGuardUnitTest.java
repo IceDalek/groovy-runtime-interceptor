@@ -126,7 +126,7 @@ class RuntimeGuardUnitTest {
         // in DefaultAllowlist, Groovy's MOP reports add()/size() on an ArrayList as declared by
         // the List interface, not by ArrayList itself - verified directly (same as collect()).
         // ArrayList still counts as "allowed" for construction via the one-level interface
-        // fallback in policyFor(), since ArrayList directly implements List.
+        // fallback in isClassAllowed(), since ArrayList directly implements List.
         RuntimeGuard guard = new RuntimeGuard(Map.of("java.util.List", instancePolicy(Set.of("add"), null)));
 
         Object list = guard.checkedConstructor(ArrayList.class, new Object[]{});
@@ -136,6 +136,26 @@ class RuntimeGuardUnitTest {
         // "size" wasn't listed, so it's still denied even though the class itself is allowed
         assertThrows(SecurityException.class,
                 () -> guard.checkedCall(list, false, false, "size", new Object[0]));
+    }
+
+    @Test
+    void interfaceFallbackAppliesOnlyToConstructionNotToMethodChecks() {
+        // the interface fallback in isClassAllowed() only ever answers "is this class
+        // constructible" - it deliberately does NOT apply to isMethodAllowed()/isMethodDenied().
+        // Concretely: whitelisting java.lang.CharSequence unrestricted must not hand out every
+        // method of java.lang.StringBuilder just because StringBuilder implements CharSequence -
+        // append()/insert()/reverse() are declared by StringBuilder itself, not CharSequence, and
+        // StringBuilder was never whitelisted directly.
+        RuntimeGuard guard = new RuntimeGuard(Map.of("java.lang.CharSequence", instancePolicy(Set.of(), null)));
+        StringBuilder sb = new StringBuilder("hello");
+
+        // CharSequence-declared methods still work, since CharSequence itself is whitelisted
+        assertEquals('h', guard.checkedCall(sb, false, false, "charAt", new Object[]{0}));
+
+        // StringBuilder's own methods do not ride along via the interface fallback
+        assertThrows(SecurityException.class, () ->
+                guard.checkedCall(sb, false, false, "append", new Object[]{" world"}));
+        assertEquals("hello", sb.toString());
     }
 
     @Test
